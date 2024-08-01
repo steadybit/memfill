@@ -1,4 +1,6 @@
 use std::{fs, io, num};
+use std::fs::File;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use nix::unistd;
 use strum_macros::Display;
@@ -7,6 +9,7 @@ use strum_macros::Display;
 pub enum CGroupError {
 	File(PathBuf, io::Error),
 	Parse(PathBuf, num::ParseIntError),
+	CgroupControllerNotFound(),
 }
 
 pub struct CGroupMemory {
@@ -27,10 +30,26 @@ pub fn read_cgroup_memory() -> Result<CGroupMemory, CGroupError> {
 }
 
 fn read_cgroup_v2_memory() -> Result<CGroupMemory, CGroupError> {
-	let (limit, unlimited) = read_file_usize(Path::new("/sys/fs/cgroup/memory.max"))?;
-	let (usage, _) = read_file_usize(Path::new("/sys/fs/cgroup/memory.current"))?;
+	let controller_path = Path::new("/sys/fs/cgroup").join(read_cgroupv2_controller()?.strip_prefix("/").unwrap_or("").to_owned());
+
+	let (limit, unlimited) = read_file_usize(controller_path.join("memory.max"))?;
+	let (usage, _) = read_file_usize(controller_path.join("memory.current"))?;
 
 	Ok(CGroupMemory { usage, limit, unlimited })
+}
+
+fn read_cgroupv2_controller() -> Result<String, CGroupError> {
+	let path = PathBuf::from("/proc/self/cgroup");
+	let file = File::open(path.as_path()).map_err(|e| CGroupError::File(path, e))?;
+	let lines = io::BufReader::new(file).lines();
+
+	for line in lines.flatten() {
+		let parts: Vec<&str> = line.splitn(3, ":").collect();
+		if parts[0] == "0" {
+			return Ok(parts[2].to_string());
+		}
+	}
+	Err(CGroupError::CgroupControllerNotFound())
 }
 
 fn read_cgroup_v1_memory() -> Result<CGroupMemory, CGroupError> {
@@ -47,12 +66,12 @@ fn cgroup_v1_mem_unlimited() -> usize {
 	return 0;
 }
 
-fn read_file_usize(path: &Path) -> Result<(usize, bool), CGroupError> {
-	let line = fs::read_to_string(path).map_err(|e| CGroupError::File(path.to_owned(), e))?;
+fn read_file_usize<P: AsRef<Path>>(path: P) -> Result<(usize, bool), CGroupError> {
+	let line = fs::read_to_string(path.as_ref()).map_err(|e| CGroupError::File(PathBuf::from(path.as_ref()), e))?;
 	if line.trim() == "max" {
 		Ok((0, true))
 	} else {
-		let i = line.trim().parse().map_err(|e| CGroupError::Parse(path.to_owned(), e))?;
+		let i = line.trim().parse().map_err(|e| CGroupError::Parse(PathBuf::from(path.as_ref()), e))?;
 		Ok((i, false))
 	}
 }
