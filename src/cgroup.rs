@@ -19,23 +19,36 @@ pub struct CGroupMemory {
 }
 
 pub fn read_cgroup_memory() -> Result<CGroupMemory, CGroupError> {
-	let v2 = read_cgroup_v2_memory();
-	if v2.is_err() {
-		let v1 = read_cgroup_v1_memory();
-		if v1.is_ok() {
-			return v1;
-		}
+	if uses_cgroup_v2() {
+		read_cgroup_v2_memory()
+	} else {
+		read_cgroup_v1_memory()
 	}
-	return v2;
+}
+
+fn uses_cgroup_v2() -> bool {
+	return Path::new("/sys/fs/cgroup/cgroup.controllers").exists();
 }
 
 fn read_cgroup_v2_memory() -> Result<CGroupMemory, CGroupError> {
-	let controller_path = Path::new("/sys/fs/cgroup").join(read_cgroupv2_controller()?.strip_prefix("/").unwrap_or("").to_owned());
+	let mut controller_path = Path::new("/sys/fs/cgroup").join(read_cgroupv2_controller()?.strip_prefix("/").unwrap_or(""));
 
-	let (limit, unlimited) = read_file_usize(controller_path.join("memory.max"))?;
-	let (usage, _) = read_file_usize(controller_path.join("memory.current"))?;
+	loop {
+		let mem_max = controller_path.join("memory.max");
+		let mem_current = controller_path.join("memory.current");
 
-	Ok(CGroupMemory { usage, limit, unlimited })
+		if mem_max.exists() && mem_current.exists() {
+			let (limit, unlimited) = read_file_usize(mem_max)?;
+			let (usage, _) = read_file_usize(mem_current)?;
+
+			return Ok(CGroupMemory { usage, limit, unlimited });
+		}
+
+		match controller_path.parent() {
+			Some(p) => { controller_path = p.to_owned(); }
+			None => return Err(CGroupError::CgroupControllerNotFound())
+		}
+	}
 }
 
 fn read_cgroupv2_controller() -> Result<String, CGroupError> {
