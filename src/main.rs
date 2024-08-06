@@ -49,7 +49,7 @@ enum AllocationMode {
 
 #[derive(Debug)]
 enum Size {
-	Bytes(u64),
+	Bytes(usize),
 	Percent(u16),
 }
 
@@ -60,7 +60,7 @@ fn parse_size(input: impl AsRef<str>) -> Result<Size, String> {
 		Ok(Size::Percent(percent))
 	} else {
 		let byte: ByteSize = input.parse().map_err(|e| format!("{}", e))?;
-		Ok(Size::Bytes(byte.as_u64()))
+		Ok(Size::Bytes(byte.as_u64() as usize))
 	}
 }
 
@@ -68,6 +68,14 @@ fn parse_size(input: impl AsRef<str>) -> Result<Size, String> {
 struct MemInfo {
 	available: usize,
 	total: usize,
+}
+
+fn bytes_to_string_i64(bytes: i64) -> String {
+	format!("{}{}", if bytes < 0 { "-" } else { "" }, ByteSize::b(bytes.unsigned_abs()).to_string_as(true))
+}
+
+fn bytes_to_string_usize(bytes: usize) -> String {
+	ByteSize::b(bytes as u64).to_string_as(true)
 }
 
 trait MemInfoProvider {
@@ -100,9 +108,10 @@ impl MemInfoProvider for CgroupMemInfo {
 
 trait Allocator {
 	fn update(&mut self);
+	fn size(&self) -> usize;
 }
 
-fn new_allocator(mode: AllocationMode, mem_info_provider: Box<dyn MemInfoProvider>, size: Size) -> Box<dyn Allocator> {
+fn new_allocator<'a>(mode: AllocationMode, mem_info_provider: &'a dyn MemInfoProvider, size: Size) -> Box<dyn Allocator + 'a> {
 	match mode {
 		AllocationMode::Absolute => { Box::new(AbsoluteAllocator::new(mem_info_provider, size)) }
 		AllocationMode::Usage => { Box::new(UsageAllocator::new(mem_info_provider, size)) }
@@ -115,7 +124,7 @@ struct AbsoluteAllocator {
 }
 
 impl AbsoluteAllocator {
-	fn new(provider: Box<dyn MemInfoProvider>, size: Size) -> Self {
+	fn new(provider: &dyn MemInfoProvider, size: Size) -> Self {
 		let mem = provider.mem_info();
 		let (bytes, percent) = match size {
 			Size::Bytes(bytes) => {
@@ -123,12 +132,12 @@ impl AbsoluteAllocator {
 				(bytes, percent)
 			}
 			Size::Percent(percent) => {
-				let bytes = (mem.total as f64 * percent as f64 / 100.0) as u64;
+				let bytes = (mem.total as f64 * percent as f64 / 100.0) as usize;
 				(bytes, percent)
 			}
 		};
-		println!("Allocating {} ({}% of total memory)", ByteSize::b(bytes).to_string_as(true), percent);
-		return Self { bytes: bytes as usize, chunks: Chunks::new() };
+		println!("Allocating {} ({}% of total memory)", bytes_to_string_usize(bytes), percent);
+		return Self { bytes, chunks: Chunks::new() };
 	}
 }
 
@@ -137,16 +146,20 @@ impl Allocator for AbsoluteAllocator {
 		self.chunks.check();
 		self.chunks.resize(self.bytes)
 	}
+
+	fn size(&self) -> usize {
+		self.chunks.size()
+	}
 }
 
-struct UsageAllocator {
+struct UsageAllocator<'a> {
 	available_bytes: i64,
 	chunks: Chunks,
-	provider: Box<dyn MemInfoProvider>,
+	provider: Box<&'a dyn MemInfoProvider>,
 }
 
-impl UsageAllocator {
-	fn new(provider: Box<dyn MemInfoProvider>, size: Size) -> Self {
+impl<'a> UsageAllocator<'a> {
+	fn new(provider: &'a dyn MemInfoProvider, size: Size) -> Self {
 		let mem = provider.mem_info();
 		let (available_bytes, available_percent) = match size {
 			Size::Bytes(bytes) => {
@@ -160,17 +173,20 @@ impl UsageAllocator {
 				(available_bytes, available_percent)
 			}
 		};
-		println!("Allocate until {}{} ({}% of total memory) available left", if available_bytes < 0 { "-" } else { "" }, ByteSize::b(available_bytes.unsigned_abs()).to_string_as(true), available_percent);
-		return Self { available_bytes, chunks: Chunks::new(), provider };
+		println!("Allocate until {} ({}% of total memory) available left", bytes_to_string_i64(available_bytes), available_percent);
+		return Self { available_bytes, chunks: Chunks::new(), provider: Box::new(provider) };
 	}
 }
 
-impl Allocator for UsageAllocator {
+impl Allocator for UsageAllocator<'_> {
 	fn update(&mut self) {
 		let mem = self.provider.mem_info();
 		let diff = mem.available as i64 - self.available_bytes;
 		self.chunks.check();
 		self.chunks.adjust_by(diff)
+	}
+	fn size(&self) -> usize {
+		self.chunks.size()
 	}
 }
 
@@ -186,7 +202,7 @@ impl Chunks {
 		return Self { chunks: vec![], last_allocation: Instant::now() };
 	}
 
-	fn size(&mut self) -> usize {
+	fn size(&self) -> usize {
 		self.chunks.iter().map(|c| { c.size() }).sum()
 	}
 
@@ -202,7 +218,7 @@ impl Chunks {
 	fn adjust_by(&mut self, size: i64) {
 		let now = Instant::now();
 		if now - self.last_allocation < Duration::from_secs(1) && size < 2 * MB {
-			return
+			return;
 		}
 		self.last_allocation = now;
 
@@ -260,7 +276,7 @@ impl Chunk {
 				if res != rand {
 					panic!("[{}] Memory pattern assertion failed", process::id());
 				}
-				println!("[{}] Allocated {}", process::id(), ByteSize::b(size as u64).to_string_as(true));
+				println!("[{}] Allocated {}", process::id(), bytes_to_string_usize(size));
 
 				unistd::pause();
 
@@ -307,11 +323,11 @@ impl Chunk {
 	fn wait(&mut self, option: Option<WaitPidFlag>) {
 		match waitpid(self.pid, option) {
 			Ok(WaitStatus::Exited(pid, code)) => {
-				println!("[{}] Exited({}) and de-allocated {}", pid, code, ByteSize::b(self.size as u64).to_string_as(true));
+				println!("[{}] Exited({}) and de-allocated {}", pid, code, bytes_to_string_usize(self.size));
 				self.pid = PID_ZERO;
 			}
 			Ok(WaitStatus::Signaled(pid, signal, _)) => {
-				println!("[{}] Killed by {} and de-allocated {}", pid, signal, ByteSize::b(self.size as u64).to_string_as(true));
+				println!("[{}] Killed by {} and de-allocated {}", pid, signal, bytes_to_string_usize(self.size));
 				self.pid = PID_ZERO;
 			}
 			Ok(_) => {}
@@ -344,12 +360,23 @@ fn main() {
 		Box::new(CgroupMemInfo {})
 	};
 
-	let mut allocator = new_allocator(opts.alloc_mode, mem_info, opts.size);
+	let mut allocator = new_allocator(opts.alloc_mode, mem_info.as_ref(), opts.size);
 	println!("Terminating after {}s", opts.duration.as_secs());
 	let deadline = Instant::now() + opts.duration;
+	let mut last_log = Instant::now() - Duration::from_secs(5);
 	while Instant::now() < deadline {
 		allocator.update();
-		sleep(Duration::from_millis(1000));
+
+		let now = Instant::now();
+		if now - last_log > Duration::from_secs(5) {
+			let mem = mem_info.mem_info();
+			print!("Available memory: {} ({}% of total memory); ", bytes_to_string_usize(mem.available), (mem.available as f64 / mem.total as f64 * 100.0).round() as i16);
+			print!("Allocated by memfill: {} ({}% of total memory)", bytes_to_string_usize(allocator.size()), (allocator.size() as f64 / mem.total as f64 * 100.0).round() as i16);
+			println!();
+			last_log = now;
+		}
+
+		sleep(Duration::from_millis(50));
 	}
 }
 
