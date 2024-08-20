@@ -16,7 +16,7 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::{libc, unistd};
 use nix::unistd::{fork, Pid, Uid};
 use nix::unistd::ForkResult;
-use procfs::{Current, Meminfo};
+use procfs::{Current, Meminfo, ProcError};
 use procfs::process::{Process, ProcState};
 use structopt::{StructOpt};
 use strum_macros::EnumString;
@@ -284,21 +284,24 @@ impl Chunk {
 				process::exit(0);
 			}
 			Ok(ForkResult::Parent { child, .. }) => {
-				match Process::new(child.into()) {
-					Ok(child_process) => {
-						loop {
+				let deadline = Instant::now() + Duration::from_secs(5);
+				loop {
+					let err: ProcError;
+					match Process::new(child.into()) {
+						Ok(child_process) => {
 							match child_process.stat().and_then(|s| s.state()) {
-								Ok(ProcState::Sleeping) => { break; }
-								Ok(_) => { sleep(Duration::from_millis(100)); }
-								Err(e) => { eprintln!("Failed to read state for new child: {}", e); }
+								Ok(ProcState::Sleeping) => { return Self { size, pid: child } }
+								Ok(state) => { err = ProcError::Other(format!("Unexpected state: {:?}", state))}
+								Err(e) => { err = e}
 							}
 						}
-						Self { size, pid: child }
+						Err(e) => { err = e}
 					}
-					Err(e) => {
-						eprintln!("Failed to find new child: {}", e);
-						Self { size: 0, pid: PID_ZERO }
+					if Instant::now() > deadline {
+						eprintln!("Child process {} not in expected sleeping state: {}", child, err);
+						return Self { size: 0, pid: PID_ZERO }
 					}
+					sleep(Duration::from_millis(50))
 				}
 			}
 			Err(e) => {
