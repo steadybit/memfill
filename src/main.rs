@@ -2,6 +2,7 @@ mod cgroup;
 
 use std::{fs, process, str};
 use std::alloc::{alloc, dealloc, Layout};
+use std::os::fd::{AsFd, AsRawFd};
 use std::ptr::{copy, write_bytes};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -16,8 +17,7 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::{libc, unistd};
 use nix::unistd::{fork, Pid, Uid};
 use nix::unistd::ForkResult;
-use procfs::{Current, Meminfo, ProcError};
-use procfs::process::{Process, ProcState};
+use procfs::{Current, Meminfo};
 use structopt::{StructOpt};
 use strum_macros::EnumString;
 
@@ -195,7 +195,8 @@ struct Chunks {
 	last_allocation: Instant,
 }
 
-const MB: i64 = 1024 * 1024;
+const KB: i64 = 1024;
+const MB: i64 = 1024 * KB;
 
 impl Chunks {
 	fn new() -> Self {
@@ -217,11 +218,10 @@ impl Chunks {
 
 	fn adjust_by(&mut self, size: i64) {
 		let now = Instant::now();
-		if now - self.last_allocation < Duration::from_secs(1) && size < 2 * MB {
+		if now - self.last_allocation < Duration::from_secs(1) && size.abs() < 2 * MB {
 			return;
 		}
 		self.last_allocation = now;
-
 		let mut freed = 0;
 		while freed < -size {
 			match self.chunks.pop() {
@@ -246,7 +246,7 @@ struct Chunk {
 	pid: Pid,
 }
 
-extern "C" fn handle(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
+extern "C" fn sig_cont(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
 	//NOOP
 }
 
@@ -258,10 +258,12 @@ impl Chunk {
 			return Self { size, pid: PID_ZERO };
 		}
 
+		let pipe = unistd::pipe().unwrap();
+
 		match unsafe { fork() } {
 			Ok(ForkResult::Child) => unsafe {
 				prctl::set_pdeathsig(Some(Signal::SIGTERM)).unwrap();
-				sigaction(SIGCONT, &SigAction::new(SigHandler::SigAction(handle), SaFlags::empty(), SigSet::empty())).unwrap();
+				sigaction(SIGCONT, &SigAction::new(SigHandler::SigAction(sig_cont), SaFlags::empty(), SigSet::empty())).unwrap();
 
 				let layout = Layout::array::<u8>(size).unwrap();
 				let ptr = alloc(layout);
@@ -278,32 +280,20 @@ impl Chunk {
 				}
 				println!("[{}] Allocated {}", process::id(), bytes_to_string_usize(size));
 
+				unistd::write(pipe.1.as_fd(), "0".as_bytes()).unwrap();
 				unistd::pause();
 
 				dealloc(ptr, layout);
+
 				process::exit(0);
 			}
+
 			Ok(ForkResult::Parent { child, .. }) => {
-				let deadline = Instant::now() + Duration::from_secs(5);
-				loop {
-					let err: ProcError;
-					match Process::new(child.into()) {
-						Ok(child_process) => {
-							match child_process.stat().and_then(|s| s.state()) {
-								Ok(ProcState::Sleeping) => { return Self { size, pid: child } }
-								Ok(state) => { err = ProcError::Other(format!("Unexpected state: {:?}", state))}
-								Err(e) => { err = e}
-							}
-						}
-						Err(e) => { err = e}
-					}
-					if Instant::now() > deadline {
-						eprintln!("Child process {} not in expected sleeping state: {}", child, err);
-						return Self { size: 0, pid: PID_ZERO }
-					}
-					sleep(Duration::from_millis(50))
-				}
+				let buf =&mut [0u8];
+				unistd::read(pipe.0.as_fd().as_raw_fd(), buf).unwrap();
+				Self { size, pid: child }
 			}
+
 			Err(e) => {
 				eprintln!("Fork failed: {}", e);
 				Self { size: 0, pid: PID_ZERO }
