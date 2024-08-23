@@ -66,10 +66,26 @@ fn read_cgroupv2_controller() -> Result<String, CGroupError> {
 }
 
 fn read_cgroup_v1_memory() -> Result<CGroupMemory, CGroupError> {
-	let (usage, _) = read_file_usize(Path::new("/sys/fs/cgroup/memory/memory.usage_in_bytes"))?;
-	let (limit, _) = read_file_usize(Path::new("/sys/fs/cgroup/memory/memory.limit_in_bytes"))?;
+	let controller_path = Path::new("/sys/fs/cgroup/memory").join(read_cgroupv1_controller()?.strip_prefix("/").unwrap_or(""));
+
+	let (usage, _) = read_file_usize(controller_path.join("memory.usage_in_bytes"))?;
+	let (limit, _) = read_file_usize(controller_path.join("memory.limit_in_bytes"))?;
 
 	Ok(CGroupMemory { usage, limit, unlimited: limit == cgroup_v1_mem_unlimited() })
+}
+
+fn read_cgroupv1_controller() -> Result<String, CGroupError> {
+	let path = PathBuf::from("/proc/self/cgroup");
+	let file = File::open(path.as_path()).map_err(|e| CGroupError::File(path, e))?;
+	let lines = io::BufReader::new(file).lines();
+
+	for line in lines.flatten() {
+		let parts: Vec<&str> = line.splitn(3, ":").collect();
+		if parts[1] == "memory" {
+			return Ok(parts[2].to_string());
+		}
+	}
+	Err(CGroupError::CgroupControllerNotFound())
 }
 
 fn cgroup_v1_mem_unlimited() -> usize {
