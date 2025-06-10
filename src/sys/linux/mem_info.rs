@@ -1,4 +1,9 @@
-struct SystemMemInfo {}
+use procfs::{Current, Meminfo};
+
+use crate::sys::linux::cgroup;
+use crate::mem_info::{MemInfo, MemInfoProvider};
+
+pub struct SystemMemInfo {}
 
 impl MemInfoProvider for SystemMemInfo {
 	fn mem_info(&self) -> MemInfo {
@@ -7,7 +12,7 @@ impl MemInfoProvider for SystemMemInfo {
 	}
 }
 
-struct CgroupMemInfo {}
+pub struct CgroupMemInfo {}
 
 impl MemInfoProvider for CgroupMemInfo {
 	fn mem_info(&self) -> MemInfo {
