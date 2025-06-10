@@ -1,5 +1,7 @@
 mod cgroup;
 
+mod windows_main;
+mod linux_main;
 use std::{fs, process, str};
 use std::alloc::{alloc, dealloc, Layout};
 use std::os::fd::{AsFd, AsRawFd};
@@ -21,6 +23,9 @@ use procfs::{Current, Meminfo};
 use structopt::{StructOpt};
 use strum_macros::EnumString;
 
+use crate::linux_main::linux_main;
+use crate::windows_main::windows_main;
+
 #[derive(StructOpt, Debug)]
 #[structopt(name = "memfill", about = "Fills memory")]
 struct Opt {
@@ -36,6 +41,7 @@ struct Opt {
 	duration: Duration,
 
 	#[structopt(long, help = "ignore cgroup; computes total/usage from system information")]
+	#[cfg(linux)]
 	ignore_cgroup: bool,
 }
 
@@ -345,7 +351,12 @@ impl Chunk {
 
 fn main() {
 	let opts = Opt::from_args();
-	adjust_oom_score();
+
+	#[cfg(linux)]
+	linux_main();
+
+	#[cfg(windows)]
+	windows_main();
 
 	let mem_info: Box<dyn MemInfoProvider> = if opts.ignore_cgroup {
 		Box::new(SystemMemInfo {})
@@ -373,12 +384,3 @@ fn main() {
 	}
 }
 
-fn adjust_oom_score() -> () {
-	let is_privileged = Uid::current().is_root() || Uid::effective().is_root();
-	match fs::write("/proc/self/oom_score_adj", if is_privileged { "-1000" } else { "0" }) {
-		Ok(_) => {}
-		Err(e) => {
-			eprintln!("Failed to adjust OOM score: {}", e);
-		}
-	}
-}
