@@ -37,9 +37,9 @@ fn main() {
 	if let Some(flag) = args.next(){
 		if flag == "--allocate" {
 			if let Some(size_str) = args.next(){
-				let size: usize = size_str.parse().expect("Invalid size");
+				let _size: usize = size_str.parse().expect("Invalid size");
                 #[cfg(windows)]
-                return windows_main::allocate_mode(size);
+                return windows_main::allocate_mode(_size);
                 #[cfg(unix)]
                 unreachable!();
 			}

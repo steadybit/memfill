@@ -12,8 +12,7 @@ use nix::{libc, unistd};
 use nix::unistd::{fork, Pid};
 use nix::unistd::ForkResult;
 
-use crate::allocator::{Allocator, Chunks, Size};
-use crate::mem_info::{bytes_to_string_i64, bytes_to_string_usize, MemInfoProvider};
+use crate::mem_info::{bytes_to_string_usize};
 
 
 pub struct LinuxChunk {
