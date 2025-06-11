@@ -1,5 +1,6 @@
 use std::alloc::{alloc, dealloc};
 use std::alloc::{Layout};
+use std::io::Write;
 use std::ptr::NonNull;
 use std::{thread::sleep};
 use std::time::Duration;
@@ -16,6 +17,13 @@ pub fn allocate_mode(size: usize){
 	let ptr = NonNull::new(ptr).expect("Allocation failed");
 	unsafe {
 		std::ptr::write_bytes(ptr.as_ptr(), 0u8, size); 
+
+		let mut sum: u8 = 0;
+		for i in 0..size {
+			sum = sum.wrapping_add(std::ptr::read_volatile(ptr.as_ptr().add(i)))
+		}
+
+		std::io::sink().write_all(&[sum]).ok();
 	}
 
 	std::thread::park();
