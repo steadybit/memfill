@@ -1,5 +1,5 @@
 use sysinfo::Pid;
-use std::{process::{Child, Command}};
+use std::process::{Child, Command};
 
 use crate::mem_info::bytes_to_string_usize;
 

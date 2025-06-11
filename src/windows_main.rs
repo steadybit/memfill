@@ -15,7 +15,7 @@ pub fn allocate_mode(size: usize){
 	let ptr = unsafe { alloc(layout) };
 	let ptr = NonNull::new(ptr).expect("Allocation failed");
 	unsafe {
-		std::ptr::write_bytes(ptr.as_ptr(), 0u8, size); // zero out memory
+		std::ptr::write_bytes(ptr.as_ptr(), 0u8, size); 
 	}
 
 	std::thread::park();
