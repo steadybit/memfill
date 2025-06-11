@@ -1,14 +1,15 @@
 use std::time::{Duration};
 use duration_str::parse as parse_duration;
 use structopt::{StructOpt};
-
 use crate::allocator::{parse_size, AllocationMode, Size};
 
 mod sys;
 mod mem_info;
+mod allocator;
 #[cfg(unix)]
 mod linux_main;
-mod allocator;
+#[cfg(windows)]
+mod windows_main;
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "memfill", about = "Fills memory")]
@@ -30,12 +31,27 @@ struct Opt {
 }
 
 fn main() {
+	let mut args = std::env::args();
+	args.next();
+
+	if let Some(flag) = args.next(){
+		if flag == "--allocate" {
+			if let Some(size_str) = args.next(){
+				let size: usize = size_str.parse().expect("Invalid size");
+                #[cfg(windows)]
+                return windows_main::allocate_mode(size);
+                #[cfg(unix)]
+                unreachable!();
+			}
+		}
+	}
+
 	let opts = Opt::from_args();
 
 	#[cfg(unix)]
-	linux_main::linux_main(opts);
+	return linux_main::linux_main(opts);
 
 	#[cfg(windows)]
-	windows_main();
+	return windows_main::windows_main(opts);
 }
 

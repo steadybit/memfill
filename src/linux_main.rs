@@ -34,6 +34,7 @@ pub fn linux_main(opts: Opt){
 
 		sleep(Duration::from_millis(50));
 	}
+	allocator.free();
 }
 
 

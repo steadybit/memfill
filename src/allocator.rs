@@ -3,8 +3,9 @@ use std::time::{Duration, Instant};
 use bytesize::ByteSize;
 use strum_macros::EnumString;
 
+use crate::mem_info::{bytes_to_string_i64, bytes_to_string_usize};
 use crate::{mem_info::MemInfoProvider};
-use crate::sys::platform::{AbsoluteAllocator, Chunk, UsageAllocator};
+use crate::sys::platform::{Chunk};
 
 #[derive(EnumString, Debug)]
 pub enum AllocationMode {
@@ -35,12 +36,93 @@ pub fn parse_size(input: impl AsRef<str>) -> Result<Size, String> {
 pub trait Allocator {
 	fn update(&mut self);
 	fn size(&self) -> usize;
+	fn free(&mut self);
 }
 
 pub fn new_allocator<'a>(mode: AllocationMode, mem_info_provider: &'a dyn MemInfoProvider, size: Size) -> Box<dyn Allocator + 'a> {
 	match mode {
 		AllocationMode::Absolute => { Box::new(AbsoluteAllocator::new(mem_info_provider, size)) }
 		AllocationMode::Usage => { Box::new(UsageAllocator::new(mem_info_provider, size)) }
+	}
+}
+
+
+pub struct AbsoluteAllocator {
+	bytes: usize,
+	chunks: Chunks,
+}
+
+impl AbsoluteAllocator {
+	pub fn new(provider: &dyn MemInfoProvider, size: Size) -> Self {
+		let mem = provider.mem_info();
+		let (bytes, percent) = match size {
+			Size::Bytes(bytes) => {
+				let percent = (bytes as f64 / mem.total as f64 * 100.0).round() as u16;
+				(bytes, percent)
+			}
+			Size::Percent(percent) => {
+				let bytes = (mem.total as f64 * percent as f64 / 100.0) as usize;
+				(bytes, percent)
+			}
+		};
+		println!("Allocating {} ({}% of total memory)", bytes_to_string_usize(bytes), percent);
+		return Self { bytes, chunks: Chunks::new() };
+	}
+}
+
+impl Allocator for AbsoluteAllocator {
+	fn update(&mut self) {
+		self.chunks.check();
+		self.chunks.resize(self.bytes)
+	}
+
+	fn size(&self) -> usize {
+		self.chunks.size()
+	}
+
+	fn free(&mut self) {
+		self.chunks.free();
+	}
+}
+
+pub struct UsageAllocator<'a> {
+	available_bytes: i64,
+	chunks: Chunks,
+	provider: Box<&'a dyn MemInfoProvider>,
+}
+
+impl<'a> UsageAllocator<'a> {
+	pub fn new(provider: &'a dyn MemInfoProvider, size: Size) -> Self {
+		let mem = provider.mem_info();
+		let (available_bytes, available_percent) = match size {
+			Size::Bytes(bytes) => {
+				let available_bytes = mem.total as i64 - bytes as i64;
+				let available_percent = (available_bytes as f64 / mem.total as f64 * 100.0).round() as i16;
+				(available_bytes, available_percent)
+			}
+			Size::Percent(percent) => {
+				let available_bytes = mem.total as i64 - (mem.total as f64 * percent as f64 / 100.0) as i64;
+				let available_percent = (available_bytes as f64 / mem.total as f64 * 100.0).round() as i16;
+				(available_bytes, available_percent)
+			}
+		};
+		println!("Allocate until {} ({}% of total memory) available left", bytes_to_string_i64(available_bytes), available_percent);
+		return Self { available_bytes, chunks: Chunks::new(), provider: Box::new(provider) };
+	}
+}
+
+impl Allocator for UsageAllocator<'_> {
+	fn update(&mut self) {
+		let mem = self.provider.mem_info();
+		let diff = mem.available as i64 - self.available_bytes;
+		self.chunks.check();
+		self.chunks.adjust_by(diff)
+	}
+	fn size(&self) -> usize {
+		self.chunks.size()
+	}
+	fn free(&mut self) {
+		self.chunks.free();
 	}
 }
 
@@ -69,6 +151,11 @@ impl Chunks {
 	pub fn resize(&mut self, size: usize) {
 		let diff = size as i64 - self.size() as i64;
 		self.adjust_by(diff)
+	}
+
+	pub fn free(&mut self){
+		self.chunks.iter_mut().for_each(|c| { c.free(); });
+		self.chunks.truncate(0);
 	}
 
 	pub fn adjust_by(&mut self, size: i64) {
