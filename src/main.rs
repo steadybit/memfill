@@ -1,15 +1,20 @@
+use std::thread::sleep;
 use std::time::{Duration};
+use std::time::Instant;
 use duration_str::parse as parse_duration;
 use structopt::{StructOpt};
-use crate::allocator::{parse_size, AllocationMode, Size};
+use crate::allocator::{new_allocator, parse_size, AllocationMode, Size};
+use crate::mem_info::bytes_to_string_usize;
+#[cfg(unix)]
+use crate::sys::linux::system::adjust_oom_score;
+use crate::sys::platform::get_mem_info;
+
+#[cfg(windows)]
+use crate::sys::windows::system::allocate_mode;
 
 mod sys;
 mod mem_info;
 mod allocator;
-#[cfg(unix)]
-mod linux_main;
-#[cfg(windows)]
-mod windows_main;
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "memfill", about = "Fills memory")]
@@ -39,7 +44,7 @@ fn main() {
 			if let Some(size_str) = args.next(){
 				let _size: usize = size_str.parse().expect("Invalid size");
                 #[cfg(windows)]
-                return windows_main::allocate_mode(_size);
+                return allocate_mode(_size);
                 #[cfg(unix)]
                 unreachable!();
 			}
@@ -47,11 +52,29 @@ fn main() {
 	}
 
 	let opts = Opt::from_args();
+	let mem_info = get_mem_info(&opts);
 
 	#[cfg(unix)]
-	return linux_main::linux_main(opts);
+	adjust_oom_score();
 
-	#[cfg(windows)]
-	return windows_main::windows_main(opts);
+	let mut allocator = new_allocator(opts.alloc_mode, mem_info.as_ref(), opts.size);
+	println!("Terminating after {}s", opts.duration.as_secs());
+	let deadline = Instant::now() + opts.duration;
+	let mut last_log = Instant::now() - Duration::from_secs(5);
+	while Instant::now() < deadline {
+		allocator.update();
+
+		let now = Instant::now();
+		if now - last_log > Duration::from_secs(5) {
+			let mem = mem_info.mem_info();
+			print!("Available memory: {} ({}% of total memory); ", bytes_to_string_usize(mem.available), (mem.available as f64 / mem.total as f64 * 100.0).round() as i16);
+			print!("Allocated by memfill: {} ({}% of total memory)", bytes_to_string_usize(allocator.size()), (allocator.size() as f64 / mem.total as f64 * 100.0).round() as i16);
+			println!();
+			last_log = now;
+		}
+
+		sleep(Duration::from_millis(50));
+	}
+	allocator.free();
 }
 

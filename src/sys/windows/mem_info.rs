@@ -1,5 +1,6 @@
 use crate::mem_info::{MemInfo, MemInfoProvider};
 use sysinfo::System;
+use crate::Opt;
 
 pub struct SystemMemInfo {}
 
@@ -11,4 +12,8 @@ impl MemInfoProvider for SystemMemInfo {
         let available = sys.available_memory() as usize;
 		return MemInfo { available, total };
 	}
+}
+
+pub fn get_windows_mem_info(_: &Opt) -> Box<dyn MemInfoProvider>{
+    Box::new(SystemMemInfo {})
 }

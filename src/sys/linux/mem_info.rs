@@ -2,6 +2,7 @@ use procfs::{Current, Meminfo};
 
 use crate::sys::linux::cgroup;
 use crate::mem_info::{MemInfo, MemInfoProvider};
+use crate::Opt;
 
 pub struct SystemMemInfo {}
 
@@ -25,4 +26,12 @@ impl MemInfoProvider for CgroupMemInfo {
 
 		return MemInfo { available, total };
 	}
+}
+
+pub fn get_linux_mem_info(opts: &Opt) -> Box<dyn MemInfoProvider>{
+	if opts.ignore_cgroup {
+		return Box::new(SystemMemInfo {})
+	} else {
+		return Box::new(CgroupMemInfo {})
+	};
 }
