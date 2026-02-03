@@ -274,3 +274,192 @@ async fn test_usage_mode_allocation() {
         output
     );
 }
+
+/// Test: SIGTERM handling and clean shutdown
+///
+/// Verifies that when memfill receives SIGTERM:
+/// 1. Allocation happens successfully
+/// 2. The process responds to SIGTERM and exits with code 143 (128 + 15)
+/// 3. Child processes are automatically killed via PR_SET_PDEATHSIG
+///
+/// Note: When killed by signal, the parent can't call waitpid() to report
+/// child de-allocation. The children still get killed (via pdeathsig),
+/// but no de-allocation message is printed.
+#[tokio::test]
+async fn test_sigterm_clean_shutdown() {
+    use common::{ensure_binary_built, run_in_container, ContainerConfig};
+
+    ensure_binary_built().await;
+
+    // Use a shell script to:
+    // 1. Start memfill in background
+    // 2. Wait for allocation to complete
+    // 3. Send SIGTERM
+    // 4. Wait and capture exit status
+    let script = r#"
+        /build/target/release/memfill 20M absolute 60s &
+        PID=$!
+
+        # Wait for allocation to appear in output (up to 5 seconds)
+        sleep 3
+
+        # Send SIGTERM
+        kill -TERM $PID 2>/dev/null
+
+        # Wait for process and capture exit code
+        wait $PID
+        EXIT_CODE=$?
+        echo "MEMFILL_EXIT_CODE=$EXIT_CODE"
+    "#;
+
+    let config = ContainerConfig::new().with_memory(100 * 1024 * 1024);
+    let (stdout, stderr, exit) = run_in_container(config, &["sh", "-c", script]).await;
+
+    let output = format!("{}{}", stdout, stderr);
+
+    println!("=== Test: SIGTERM Clean Shutdown ===");
+    println!("Exit Code: {}", exit);
+    println!("{}", output);
+
+    // Verify allocation happened before termination
+    let allocated = count_pattern(&output, "Allocated");
+    assert!(
+        allocated > 0,
+        "Expected allocation before SIGTERM. Output:\n{}",
+        output
+    );
+
+    // Verify memfill was killed by SIGTERM (exit code 143 = 128 + 15)
+    assert!(
+        output.contains("MEMFILL_EXIT_CODE=143"),
+        "Expected exit code 143 (killed by SIGTERM). Output:\n{}",
+        output
+    );
+
+    // Verify the process was terminated (shell reports "Terminated")
+    assert!(
+        output.contains("Terminated"),
+        "Expected 'Terminated' message from shell. Output:\n{}",
+        output
+    );
+}
+
+/// Test: SIGINT (Ctrl+C) handling and clean shutdown
+///
+/// Verifies that when memfill receives SIGINT:
+/// 1. Allocation happens successfully
+/// 2. The process responds to SIGINT and exits with code 130 (128 + 2)
+/// 3. Child processes are automatically killed via PR_SET_PDEATHSIG
+#[tokio::test]
+async fn test_sigint_clean_shutdown() {
+    use common::{ensure_binary_built, run_in_container, ContainerConfig};
+
+    ensure_binary_built().await;
+
+    // Use bash with job control (-m) which properly delivers SIGINT to background jobs.
+    // Without job control, background processes inherit SIG_IGN for SIGINT.
+    let script = r#"
+        set -m  # Enable job control
+        /build/target/release/memfill 20M absolute 60s &
+        PID=$!
+
+        # Wait for allocation
+        sleep 3
+
+        # Send SIGINT
+        kill -INT $PID 2>/dev/null
+
+        # Wait for process and capture exit code
+        wait $PID
+        EXIT_CODE=$?
+        echo "MEMFILL_EXIT_CODE=$EXIT_CODE"
+    "#;
+
+    let config = ContainerConfig::new().with_memory(100 * 1024 * 1024);
+    let (stdout, stderr, exit) = run_in_container(config, &["bash", "-c", script]).await;
+
+    let output = format!("{}{}", stdout, stderr);
+
+    println!("=== Test: SIGINT Clean Shutdown ===");
+		println!("Exit Code: {}", exit);
+    println!("{}", output);
+
+    // Verify allocation happened before termination
+    let allocated = count_pattern(&output, "Allocated");
+    assert!(
+        allocated > 0,
+        "Expected allocation before SIGINT. Output:\n{}",
+        output
+    );
+
+    // Verify memfill was killed by SIGINT (exit code 130 = 128 + 2)
+    assert!(
+        output.contains("MEMFILL_EXIT_CODE=130"),
+        "Expected exit code 130 (killed by SIGINT). Output:\n{}",
+        output
+    );
+}
+
+/// Test: SIGKILL handling (immediate termination)
+///
+/// Verifies that when memfill receives SIGKILL:
+/// 1. Allocation happens successfully
+/// 2. The process is immediately terminated with exit code 137 (128 + 9)
+/// 3. Child processes are automatically killed via PR_SET_PDEATHSIG
+///
+/// Note: SIGKILL cannot be caught or handled - the kernel terminates the process
+/// immediately. No cleanup code runs in the parent, but children still die
+/// because PR_SET_PDEATHSIG triggers when the parent dies for any reason.
+#[tokio::test]
+async fn test_sigkill_immediate_termination() {
+    use common::{ensure_binary_built, run_in_container, ContainerConfig};
+
+    ensure_binary_built().await;
+
+    let script = r#"
+        /build/target/release/memfill 20M absolute 60s &
+        PID=$!
+
+        # Wait for allocation
+        sleep 3
+
+        # Send SIGKILL (cannot be caught)
+        kill -KILL $PID 2>/dev/null
+
+        # Wait for process and capture exit code
+        wait $PID
+        EXIT_CODE=$?
+        echo "MEMFILL_EXIT_CODE=$EXIT_CODE"
+    "#;
+
+    let config = ContainerConfig::new().with_memory(100 * 1024 * 1024);
+    let (stdout, stderr, exit) = run_in_container(config, &["sh", "-c", script]).await;
+
+    let output = format!("{}{}", stdout, stderr);
+
+    println!("=== Test: SIGKILL Immediate Termination ===");
+    println!("Exit Code: {}", exit);
+    println!("{}", output);
+
+    // Verify allocation happened before termination
+    let allocated = count_pattern(&output, "Allocated");
+    assert!(
+        allocated > 0,
+        "Expected allocation before SIGKILL. Output:\n{}",
+        output
+    );
+
+    // Verify memfill was killed by SIGKILL (exit code 137 = 128 + 9)
+    assert!(
+        output.contains("MEMFILL_EXIT_CODE=137"),
+        "Expected exit code 137 (killed by SIGKILL). Output:\n{}",
+        output
+    );
+
+    // Verify the process was killed (shell reports "Killed")
+    assert!(
+        output.contains("Killed"),
+        "Expected 'Killed' message from shell. Output:\n{}",
+        output
+    );
+}
