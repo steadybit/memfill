@@ -5,7 +5,7 @@ use duration_str::parse as parse_duration;
 use structopt::{StructOpt};
 use crate::allocator::{new_allocator, parse_size, AllocationMode, Size};
 use crate::mem_info::bytes_to_string_usize;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use crate::sys::linux::system::adjust_oom_score;
 use crate::sys::platform::get_mem_info;
 
@@ -31,7 +31,7 @@ struct Opt {
 	duration: Duration,
 
 	#[structopt(long, help = "ignore cgroup; computes total/usage from system information")]
-	#[cfg(unix)]
+	#[cfg(target_os = "linux")]
 	ignore_cgroup: bool,
 }
 
@@ -45,7 +45,7 @@ fn main() {
 				let _size: usize = size_str.parse().expect("Invalid size");
                 #[cfg(windows)]
                 return allocate_mode(_size);
-                #[cfg(unix)]
+                #[cfg(not(windows))]
                 unreachable!();
 			}
 		}
@@ -54,7 +54,7 @@ fn main() {
 	let opts = Opt::from_args();
 	let mem_info = get_mem_info(&opts);
 
-	#[cfg(unix)]
+	#[cfg(target_os = "linux")]
 	adjust_oom_score();
 
 	let mut allocator = new_allocator(opts.alloc_mode, mem_info.as_ref(), opts.size);
@@ -77,4 +77,3 @@ fn main() {
 	}
 	allocator.free();
 }
-
