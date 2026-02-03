@@ -3,7 +3,7 @@
 //! This module allows the crate to compile on unsupported platforms for development
 //! and testing purposes. The actual functionality is not available.
 
-use crate::mem_info::{MemInfoProvider};
+use crate::mem_info::MemInfoProvider;
 
 /// Stub chunk type for unsupported platforms
 pub struct UnsupportedChunk;

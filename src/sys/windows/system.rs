@@ -1,15 +1,15 @@
+use std::alloc::Layout;
 use std::alloc::{alloc, dealloc};
-use std::alloc::{Layout};
 use std::io::Write;
 use std::ptr::NonNull;
 
-pub fn allocate_mode(size: usize){
+pub fn allocate_mode(size: usize) {
     let align: usize = std::mem::align_of::<u8>();
     let layout = Layout::from_size_align(size, align).expect("Invalid layout");
     let ptr = unsafe { alloc(layout) };
     let ptr = NonNull::new(ptr).expect("Allocation failed");
     unsafe {
-        std::ptr::write_bytes(ptr.as_ptr(), 0u8, size); 
+        std::ptr::write_bytes(ptr.as_ptr(), 0u8, size);
 
         let mut sum: u8 = 0;
         for i in 0..size {
