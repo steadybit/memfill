@@ -21,4 +21,20 @@ pub mod platform {
     pub use super::unsupported::get_unsupported_mem_info as get_mem_info;
     #[cfg(windows)]
     pub use super::windows::mem_info::get_windows_mem_info as get_mem_info;
+
+    // Memory-pressure signal (Linux PSI); `None` where the platform has no equivalent.
+    #[cfg(target_os = "linux")]
+    pub use super::linux::psi::memory_full_avg10 as memory_pressure;
+    #[cfg(not(any(target_os = "linux", windows)))]
+    pub use super::unsupported::memory_pressure;
+    #[cfg(windows)]
+    pub use super::windows::system::memory_pressure;
+
+    // oom_score_adj adjustment (Linux); no-op where the platform has no equivalent.
+    #[cfg(target_os = "linux")]
+    pub use super::linux::system::adjust_oom_score;
+    #[cfg(not(any(target_os = "linux", windows)))]
+    pub use super::unsupported::adjust_oom_score;
+    #[cfg(windows)]
+    pub use super::windows::system::adjust_oom_score;
 }

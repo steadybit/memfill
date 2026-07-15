@@ -27,3 +27,11 @@ pub fn allocate_mode(size: usize) {
 
     return;
 }
+
+/// Windows has no PSI-equivalent memory-pressure signal.
+pub fn memory_pressure() -> Option<f64> {
+    None
+}
+
+/// No oom_score_adj concept on Windows.
+pub fn adjust_oom_score(_score: Option<i32>) {}

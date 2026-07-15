@@ -50,11 +50,8 @@ pub trait Allocator {
     fn free(&mut self);
     /// Increase the amount of memory kept free (used by adaptive back-off under
     /// memory pressure). No-op for allocators that do not support it.
-    /// Only called on Linux (adaptive/PSI), hence `allow(dead_code)` elsewhere.
-    #[allow(dead_code)]
     fn bump_reserve(&mut self, _delta: i64) {}
     /// Decrease the adaptive reserve again once pressure has eased.
-    #[allow(dead_code)]
     fn relax_reserve(&mut self, _delta: i64) {}
 }
 
@@ -82,16 +79,8 @@ pub struct AbsoluteAllocator {
 impl AbsoluteAllocator {
     pub fn new(provider: &dyn MemInfoProvider, size: Size, reserve_bytes: Option<usize>) -> Self {
         let mem = provider.mem_info();
-        let (mut bytes, percent) = match size {
-            Size::Bytes(bytes) => {
-                let percent = (bytes as f64 / mem.total as f64 * 100.0).round() as u16;
-                (bytes, percent)
-            }
-            Size::Percent(percent) => {
-                let bytes = (mem.total as f64 * percent as f64 / 100.0) as usize;
-                (bytes, percent)
-            }
-        };
+        let mut bytes = size_to_bytes(&size, mem.total);
+        let percent = (bytes as f64 / mem.total as f64 * 100.0).round() as u16;
         if let Some(reserve) = reserve_bytes {
             let capped = bytes.min(mem.total.saturating_sub(reserve));
             if capped < bytes {
@@ -144,21 +133,8 @@ pub struct UsageAllocator<'a> {
 impl<'a> UsageAllocator<'a> {
     pub fn new(provider: &'a dyn MemInfoProvider, size: Size, reserve_bytes: Option<usize>) -> Self {
         let mem = provider.mem_info();
-        let (mut available_bytes, available_percent) = match size {
-            Size::Bytes(bytes) => {
-                let available_bytes = mem.total as i64 - bytes as i64;
-                let available_percent =
-                    (available_bytes as f64 / mem.total as f64 * 100.0).round() as i16;
-                (available_bytes, available_percent)
-            }
-            Size::Percent(percent) => {
-                let available_bytes =
-                    mem.total as i64 - (mem.total as f64 * percent as f64 / 100.0) as i64;
-                let available_percent =
-                    (available_bytes as f64 / mem.total as f64 * 100.0).round() as i16;
-                (available_bytes, available_percent)
-            }
-        };
+        let mut available_bytes = mem.total as i64 - size_to_bytes(&size, mem.total) as i64;
+        let available_percent = (available_bytes as f64 / mem.total as f64 * 100.0).round() as i16;
         if let Some(reserve) = reserve_bytes {
             if (reserve as i64) > available_bytes {
                 println!(

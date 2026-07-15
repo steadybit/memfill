@@ -10,14 +10,9 @@ use std::fs;
 /// file is unreadable).
 pub fn memory_full_avg10() -> Option<f64> {
     let content = fs::read_to_string("/proc/pressure/memory").ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("full ") {
-            for field in rest.split_whitespace() {
-                if let Some(value) = field.strip_prefix("avg10=") {
-                    return value.parse().ok();
-                }
-            }
-        }
-    }
-    None
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("full "))
+        .and_then(|rest| rest.split_whitespace().find_map(|f| f.strip_prefix("avg10=")))
+        .and_then(|value| value.parse().ok())
 }

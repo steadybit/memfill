@@ -10,7 +10,7 @@ use std::fs;
 /// Callers filling *host* memory should pass a high value so that the kernel
 /// OOM killer targets the fill process first, instead of node-critical
 /// processes such as the kubelet.
-pub fn adjust_oom_score(score: Option<i32>) -> () {
+pub fn adjust_oom_score(score: Option<i32>) {
     let value = match score {
         Some(v) => v.clamp(-1000, 1000),
         None => {
