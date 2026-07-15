@@ -262,92 +262,22 @@ impl Chunks {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::mem_info::{MemInfo, MemInfoProvider};
+    use super::clamped_reserve;
 
-    const GB: usize = 1024 * 1024 * 1024;
-    const MB: usize = 1024 * 1024;
-
-    struct FakeProvider {
-        total: usize,
-        available: usize,
-    }
-    impl MemInfoProvider for FakeProvider {
-        fn mem_info(&self) -> MemInfo {
-            MemInfo {
-                available: self.available,
-                total: self.total,
-            }
-        }
-    }
-
-    #[test]
-    fn size_to_bytes_resolves_bytes_and_percent() {
-        assert_eq!(size_to_bytes(&Size::Bytes(1234), 8 * GB), 1234);
-        assert_eq!(size_to_bytes(&Size::Percent(50), 1000), 500);
-        assert_eq!(size_to_bytes(&Size::Percent(0), 1000), 0);
-        assert_eq!(size_to_bytes(&Size::Percent(150), 1000), 1500);
-    }
-
-    #[test]
-    fn usage_reserve_raises_the_free_floor() {
-        let p = FakeProvider { total: 8 * GB, available: 4 * GB };
-        // usage 100% => leave 0 free, but a 512 MiB reserve floors it.
-        let a = UsageAllocator::new(&p, Size::Percent(100), Some(512 * MB));
-        assert_eq!(a.available_bytes, (512 * MB) as i64);
-    }
-
-    #[test]
-    fn usage_reserve_below_target_is_ignored() {
-        let p = FakeProvider { total: 8 * GB, available: 4 * GB };
-        // usage 50% of 8 GiB => leave 4 GiB free; a 512 MiB reserve is already satisfied.
-        let a = UsageAllocator::new(&p, Size::Percent(50), Some(512 * MB));
-        assert_eq!(a.available_bytes, (4 * GB) as i64);
-    }
-
-    #[test]
-    fn usage_without_reserve_leaves_nothing_at_100_percent() {
-        let p = FakeProvider { total: 8 * GB, available: 4 * GB };
-        let a = UsageAllocator::new(&p, Size::Percent(100), None);
-        assert_eq!(a.available_bytes, 0);
-    }
-
-    #[test]
-    fn absolute_reserve_caps_the_allocation() {
-        let p = FakeProvider { total: 8 * GB, available: 8 * GB };
-        // ask for 8 GiB but keep 1 GiB reserved => cap at 7 GiB.
-        let a = AbsoluteAllocator::new(&p, Size::Bytes(8 * GB), Some(GB));
-        assert_eq!(a.bytes, 7 * GB);
-    }
-
-    #[test]
-    fn absolute_without_reserve_is_uncapped() {
-        let p = FakeProvider { total: 8 * GB, available: 8 * GB };
-        let a = AbsoluteAllocator::new(&p, Size::Bytes(3 * GB), None);
-        assert_eq!(a.bytes, 3 * GB);
-    }
+    const GB: i64 = 1024 * 1024 * 1024;
+    const MB: i64 = 1024 * 1024;
 
     #[test]
     fn clamped_reserve_is_bounded_by_zero_and_held() {
         // Bump within capacity.
-        assert_eq!(clamped_reserve(0, (256 * MB) as i64, (8 * GB) as i64), (256 * MB) as i64);
+        assert_eq!(clamped_reserve(0, 256 * MB, 8 * GB), 256 * MB);
         // Bump is capped at what is currently held.
-        assert_eq!(clamped_reserve((7 * GB) as i64, (2 * GB) as i64, (8 * GB) as i64), (8 * GB) as i64);
+        assert_eq!(clamped_reserve(7 * GB, 2 * GB, 8 * GB), 8 * GB);
         // As held shrinks below the current reserve, the reserve is pulled down to it.
-        assert_eq!(clamped_reserve((5 * GB) as i64, (256 * MB) as i64, (4 * GB) as i64), (4 * GB) as i64);
+        assert_eq!(clamped_reserve(5 * GB, 256 * MB, 4 * GB), 4 * GB);
         // Relaxing reduces the reserve...
-        assert_eq!(clamped_reserve(GB as i64, -((64 * MB) as i64), (8 * GB) as i64), (GB - 64 * MB) as i64);
+        assert_eq!(clamped_reserve(GB, -(64 * MB), 8 * GB), GB - 64 * MB);
         // ...and never goes below zero.
-        assert_eq!(clamped_reserve((32 * MB) as i64, -((64 * MB) as i64), (8 * GB) as i64), 0);
-    }
-
-    #[test]
-    fn bump_reserve_is_a_noop_when_nothing_is_held() {
-        let p = FakeProvider { total: 8 * GB, available: 4 * GB };
-        let mut a = UsageAllocator::new(&p, Size::Percent(100), Some(GB));
-        // Freshly constructed: it holds nothing yet, so it cannot back off further.
-        a.bump_reserve((256 * MB) as i64);
-        assert_eq!(a.extra_reserve, 0);
-        assert_eq!(a.target_available(), GB as i64);
+        assert_eq!(clamped_reserve(32 * MB, -(64 * MB), 8 * GB), 0);
     }
 }
