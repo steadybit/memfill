@@ -127,9 +127,8 @@ fn main() {
                 if full10 > PSI_HIGH_PCT {
                     allocator.bump_reserve(ADAPTIVE_STEP_BYTES);
                     println!(
-                        "Memory pressure high (full avg10={:.1}%); freeing {} MiB to keep the host responsive",
-                        full10,
-                        ADAPTIVE_STEP_BYTES / (1024 * 1024)
+                        "Memory pressure high (full avg10={:.1}%); backing off to keep the host responsive",
+                        full10
                     );
                 } else if full10 < PSI_LOW_PCT {
                     allocator.relax_reserve(ADAPTIVE_RELAX_BYTES);
