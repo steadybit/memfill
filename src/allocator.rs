@@ -35,20 +35,42 @@ pub fn parse_size(input: impl AsRef<str>) -> Result<Size, String> {
     }
 }
 
+/// Resolves a `Size` to an absolute number of bytes, interpreting a percentage
+/// against `total`.
+pub fn size_to_bytes(size: &Size, total: usize) -> usize {
+    match size {
+        Size::Bytes(bytes) => *bytes,
+        Size::Percent(percent) => (total as f64 * *percent as f64 / 100.0) as usize,
+    }
+}
+
 pub trait Allocator {
     fn update(&mut self);
     fn size(&self) -> usize;
     fn free(&mut self);
+    /// Increase the amount of memory kept free (used by adaptive back-off under
+    /// memory pressure). No-op for allocators that do not support it.
+    /// Only called on Linux (adaptive/PSI), hence `allow(dead_code)` elsewhere.
+    #[allow(dead_code)]
+    fn bump_reserve(&mut self, _delta: i64) {}
+    /// Decrease the adaptive reserve again once pressure has eased.
+    #[allow(dead_code)]
+    fn relax_reserve(&mut self, _delta: i64) {}
 }
 
 pub fn new_allocator<'a>(
     mode: AllocationMode,
     mem_info_provider: &'a dyn MemInfoProvider,
     size: Size,
+    reserve_bytes: Option<usize>,
 ) -> Box<dyn Allocator + 'a> {
     match mode {
-        AllocationMode::Absolute => Box::new(AbsoluteAllocator::new(mem_info_provider, size)),
-        AllocationMode::Usage => Box::new(UsageAllocator::new(mem_info_provider, size)),
+        AllocationMode::Absolute => {
+            Box::new(AbsoluteAllocator::new(mem_info_provider, size, reserve_bytes))
+        }
+        AllocationMode::Usage => {
+            Box::new(UsageAllocator::new(mem_info_provider, size, reserve_bytes))
+        }
     }
 }
 
@@ -58,9 +80,9 @@ pub struct AbsoluteAllocator {
 }
 
 impl AbsoluteAllocator {
-    pub fn new(provider: &dyn MemInfoProvider, size: Size) -> Self {
+    pub fn new(provider: &dyn MemInfoProvider, size: Size, reserve_bytes: Option<usize>) -> Self {
         let mem = provider.mem_info();
-        let (bytes, percent) = match size {
+        let (mut bytes, percent) = match size {
             Size::Bytes(bytes) => {
                 let percent = (bytes as f64 / mem.total as f64 * 100.0).round() as u16;
                 (bytes, percent)
@@ -70,6 +92,17 @@ impl AbsoluteAllocator {
                 (bytes, percent)
             }
         };
+        if let Some(reserve) = reserve_bytes {
+            let capped = bytes.min(mem.total.saturating_sub(reserve));
+            if capped < bytes {
+                println!(
+                    "Capping allocation to {} to keep {} reserved",
+                    bytes_to_string_usize(capped),
+                    bytes_to_string_usize(reserve)
+                );
+            }
+            bytes = capped;
+        }
         println!(
             "Allocating {} ({}% of total memory)",
             bytes_to_string_usize(bytes),
@@ -98,15 +131,20 @@ impl Allocator for AbsoluteAllocator {
 }
 
 pub struct UsageAllocator<'a> {
+    /// Requested amount of memory to leave available (from size, floored by the
+    /// static reserve).
     available_bytes: i64,
+    /// Additional memory kept free on top of `available_bytes`, raised by the
+    /// adaptive back-off when the host is under memory pressure.
+    extra_reserve: i64,
     chunks: Chunks,
     provider: &'a dyn MemInfoProvider,
 }
 
 impl<'a> UsageAllocator<'a> {
-    pub fn new(provider: &'a dyn MemInfoProvider, size: Size) -> Self {
+    pub fn new(provider: &'a dyn MemInfoProvider, size: Size, reserve_bytes: Option<usize>) -> Self {
         let mem = provider.mem_info();
-        let (available_bytes, available_percent) = match size {
+        let (mut available_bytes, available_percent) = match size {
             Size::Bytes(bytes) => {
                 let available_bytes = mem.total as i64 - bytes as i64;
                 let available_percent =
@@ -121,6 +159,15 @@ impl<'a> UsageAllocator<'a> {
                 (available_bytes, available_percent)
             }
         };
+        if let Some(reserve) = reserve_bytes {
+            if (reserve as i64) > available_bytes {
+                println!(
+                    "Raising memory left free to the reserve of {}",
+                    bytes_to_string_i64(reserve as i64)
+                );
+                available_bytes = reserve as i64;
+            }
+        }
         println!(
             "Allocate until {} ({}% of total memory) available left",
             bytes_to_string_i64(available_bytes),
@@ -128,16 +175,21 @@ impl<'a> UsageAllocator<'a> {
         );
         Self {
             available_bytes,
+            extra_reserve: 0,
             chunks: Chunks::new(),
             provider,
         }
+    }
+
+    fn target_available(&self) -> i64 {
+        self.available_bytes + self.extra_reserve
     }
 }
 
 impl Allocator for UsageAllocator<'_> {
     fn update(&mut self) {
         let mem = self.provider.mem_info();
-        let diff = mem.available as i64 - self.available_bytes;
+        let diff = mem.available as i64 - self.target_available();
         self.chunks.check();
         self.chunks.adjust_by(diff)
     }
@@ -146,6 +198,12 @@ impl Allocator for UsageAllocator<'_> {
     }
     fn free(&mut self) {
         self.chunks.free();
+    }
+    fn bump_reserve(&mut self, delta: i64) {
+        self.extra_reserve += delta;
+    }
+    fn relax_reserve(&mut self, delta: i64) {
+        self.extra_reserve = (self.extra_reserve - delta).max(0);
     }
 }
 

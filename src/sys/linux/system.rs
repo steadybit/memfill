@@ -1,12 +1,28 @@
 use nix::unistd::Uid;
 use std::fs;
 
-pub fn adjust_oom_score() -> () {
-    let is_privileged = Uid::current().is_root() || Uid::effective().is_root();
-    match fs::write(
-        "/proc/self/oom_score_adj",
-        if is_privileged { "-1000" } else { "0" },
-    ) {
+/// Adjusts the oom_score_adj of the current process.
+///
+/// When `score` is provided it is written verbatim (clamped to the valid
+/// -1000..=1000 range). When it is `None` the historical default is kept:
+/// -1000 when running privileged (so the fill survives), 0 otherwise.
+///
+/// Callers filling *host* memory should pass a high value so that the kernel
+/// OOM killer targets the fill process first, instead of node-critical
+/// processes such as the kubelet.
+pub fn adjust_oom_score(score: Option<i32>) -> () {
+    let value = match score {
+        Some(v) => v.clamp(-1000, 1000),
+        None => {
+            let is_privileged = Uid::current().is_root() || Uid::effective().is_root();
+            if is_privileged {
+                -1000
+            } else {
+                0
+            }
+        }
+    };
+    match fs::write("/proc/self/oom_score_adj", value.to_string()) {
         Ok(_) => {}
         Err(e) => {
             eprintln!("Failed to adjust OOM score: {}", e);
