@@ -1,8 +1,6 @@
 use crate::allocator::{new_allocator, parse_size, size_to_bytes, AllocationMode, Size};
 use crate::mem_info::bytes_to_string_usize;
-#[cfg(target_os = "linux")]
-use crate::sys::linux::system::adjust_oom_score;
-use crate::sys::platform::get_mem_info;
+use crate::sys::platform::{adjust_oom_score, get_mem_info, memory_pressure};
 use duration_str::parse as parse_duration;
 use std::thread::sleep;
 use std::time::Duration;
@@ -16,18 +14,13 @@ mod allocator;
 mod mem_info;
 mod sys;
 
-// Adaptive back-off tuning (Linux/PSI only). Not exposed on the CLI on purpose.
-#[cfg(target_os = "linux")]
+// Adaptive back-off tuning. Not exposed on the CLI on purpose.
 const ADAPTIVE_INTERVAL_SECS: u64 = 1;
-#[cfg(target_os = "linux")]
 const ADAPTIVE_STEP_BYTES: i64 = 256 * 1024 * 1024;
-#[cfg(target_os = "linux")]
 const ADAPTIVE_RELAX_BYTES: i64 = 64 * 1024 * 1024;
 /// "full avg10" memory pressure (%) above which we free memory to keep the host alive.
-#[cfg(target_os = "linux")]
 const PSI_HIGH_PCT: f64 = 10.0;
 /// "full avg10" below which we let the adaptive reserve relax again.
-#[cfg(target_os = "linux")]
 const PSI_LOW_PCT: f64 = 3.0;
 
 #[derive(StructOpt, Debug)]
@@ -63,14 +56,12 @@ struct Opt {
         allow_hyphen_values = true,
         help = "oom_score_adj to set on the fill process (-1000..1000). Defaults to -1000 when privileged, 0 otherwise."
     )]
-    #[cfg(target_os = "linux")]
     oom_score_adj: Option<i32>,
 
     #[structopt(
         long,
-        help = "Adaptively free memory when the host is under memory pressure (Linux PSI), keeping the host responsive."
+        help = "Adaptively free memory when the host is under memory pressure (Linux PSI), keeping the host responsive. Requires usage mode."
     )]
-    #[cfg(target_os = "linux")]
     adaptive: bool,
 }
 
@@ -91,47 +82,46 @@ fn main() {
     }
 
     let opts = Opt::from_args();
+
+    if opts.adaptive && matches!(opts.alloc_mode, AllocationMode::Absolute) {
+        eprintln!("--adaptive is only supported in usage mode");
+        std::process::exit(2);
+    }
+
     let mem_info = get_mem_info(&opts);
 
     let total = mem_info.mem_info().total;
     let reserve_bytes = opts.reserve.as_ref().map(|s| size_to_bytes(s, total));
 
-    #[cfg(target_os = "linux")]
     adjust_oom_score(opts.oom_score_adj);
-
-    #[cfg(target_os = "linux")]
-    let adaptive = opts.adaptive;
-    #[cfg(target_os = "linux")]
-    let mut last_adaptive = Instant::now() - Duration::from_secs(ADAPTIVE_INTERVAL_SECS);
 
     let mut allocator = new_allocator(opts.alloc_mode, mem_info.as_ref(), opts.size, reserve_bytes);
     println!("Terminating after {}s", opts.duration.as_secs());
     let deadline = Instant::now() + opts.duration;
     let mut last_log = Instant::now() - Duration::from_secs(5);
+    let mut last_adaptive = Instant::now() - Duration::from_secs(ADAPTIVE_INTERVAL_SECS);
     while Instant::now() < deadline {
         allocator.update();
+        let now = Instant::now();
 
-        #[cfg(target_os = "linux")]
-        if adaptive {
-            let now = Instant::now();
-            if now.duration_since(last_adaptive) >= Duration::from_secs(ADAPTIVE_INTERVAL_SECS) {
-                if let Some(full10) = crate::sys::linux::psi::memory_full_avg10() {
-                    if full10 > PSI_HIGH_PCT {
-                        allocator.bump_reserve(ADAPTIVE_STEP_BYTES);
-                        println!(
-                            "Memory pressure high (full avg10={:.1}%); freeing {} MiB to keep the host responsive",
-                            full10,
-                            ADAPTIVE_STEP_BYTES / (1024 * 1024)
-                        );
-                    } else if full10 < PSI_LOW_PCT {
-                        allocator.relax_reserve(ADAPTIVE_RELAX_BYTES);
-                    }
+        if opts.adaptive
+            && now.duration_since(last_adaptive) >= Duration::from_secs(ADAPTIVE_INTERVAL_SECS)
+        {
+            last_adaptive = now;
+            if let Some(full10) = memory_pressure() {
+                if full10 > PSI_HIGH_PCT {
+                    allocator.bump_reserve(ADAPTIVE_STEP_BYTES);
+                    println!(
+                        "Memory pressure high (full avg10={:.1}%); freeing {} MiB to keep the host responsive",
+                        full10,
+                        ADAPTIVE_STEP_BYTES / (1024 * 1024)
+                    );
+                } else if full10 < PSI_LOW_PCT {
+                    allocator.relax_reserve(ADAPTIVE_RELAX_BYTES);
                 }
-                last_adaptive = now;
             }
         }
 
-        let now = Instant::now();
         if now - last_log > Duration::from_secs(5) {
             let mem = mem_info.mem_info();
             print!(
