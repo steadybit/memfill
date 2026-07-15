@@ -28,11 +28,3 @@ impl UnsupportedChunk {
 pub fn get_unsupported_mem_info<T>(_opts: &T) -> Box<dyn MemInfoProvider> {
     panic!("memfill is not supported on this platform. Supported platforms: Linux, Windows");
 }
-
-/// No memory-pressure signal available on unsupported platforms.
-pub fn memory_pressure() -> Option<f64> {
-    None
-}
-
-/// No OOM score adjustment on unsupported platforms.
-pub fn adjust_oom_score(_score: Option<i32>) {}
