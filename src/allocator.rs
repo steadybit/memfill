@@ -179,11 +179,20 @@ impl Allocator for UsageAllocator<'_> {
         self.chunks.free();
     }
     fn bump_reserve(&mut self, delta: i64) {
-        self.extra_reserve += delta;
+        self.extra_reserve = clamped_reserve(self.extra_reserve, delta, self.chunks.size() as i64);
     }
     fn relax_reserve(&mut self, delta: i64) {
-        self.extra_reserve = (self.extra_reserve - delta).max(0);
+        self.extra_reserve = clamped_reserve(self.extra_reserve, -delta, self.chunks.size() as i64);
     }
+}
+
+/// Clamps the adaptive extra reserve to `[0, held]`. Back-off can never keep more
+/// memory free than the fill currently holds, so the reserve stays bounded (no
+/// runaway counter) and, because `held` shrinks as memory is freed, it cannot
+/// linger far above what is actually allocated when pressure eases.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn clamped_reserve(current: i64, delta: i64, held: i64) -> i64 {
+    (current + delta).clamp(0, held.max(0))
 }
 
 pub struct Chunks {
@@ -319,14 +328,25 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_reserve_bumps_then_relaxes_to_the_floor() {
+    fn clamped_reserve_is_bounded_by_zero_and_held() {
+        // Bump within capacity.
+        assert_eq!(clamped_reserve(0, (256 * MB) as i64, (8 * GB) as i64), (256 * MB) as i64);
+        // Bump is capped at what is currently held.
+        assert_eq!(clamped_reserve((7 * GB) as i64, (2 * GB) as i64, (8 * GB) as i64), (8 * GB) as i64);
+        // As held shrinks below the current reserve, the reserve is pulled down to it.
+        assert_eq!(clamped_reserve((5 * GB) as i64, (256 * MB) as i64, (4 * GB) as i64), (4 * GB) as i64);
+        // Relaxing reduces the reserve...
+        assert_eq!(clamped_reserve(GB as i64, -((64 * MB) as i64), (8 * GB) as i64), (GB - 64 * MB) as i64);
+        // ...and never goes below zero.
+        assert_eq!(clamped_reserve((32 * MB) as i64, -((64 * MB) as i64), (8 * GB) as i64), 0);
+    }
+
+    #[test]
+    fn bump_reserve_is_a_noop_when_nothing_is_held() {
         let p = FakeProvider { total: 8 * GB, available: 4 * GB };
         let mut a = UsageAllocator::new(&p, Size::Percent(100), Some(GB));
-        assert_eq!(a.target_available(), GB as i64);
+        // Freshly constructed: it holds nothing yet, so it cannot back off further.
         a.bump_reserve((256 * MB) as i64);
-        assert_eq!(a.target_available(), (GB + 256 * MB) as i64);
-        // relaxing past the static floor clamps at it, never below.
-        a.relax_reserve((10 * GB) as i64);
         assert_eq!(a.extra_reserve, 0);
         assert_eq!(a.target_available(), GB as i64);
     }
