@@ -463,3 +463,60 @@ async fn test_sigkill_immediate_termination() {
         output
     );
 }
+
+#[tokio::test]
+async fn test_reserve_keeps_headroom_and_avoids_oom() {
+    // Usage 100% would fill the cgroup to its limit and get OOM-killed (see
+    // test_oom_killer). With --reserve it must leave that much free and finish cleanly.
+    let (stdout, stderr, exit) = run_memfill_constrained(
+        Some(512 * 1024 * 1024), // 512 MiB limit
+        None,
+        &["100%", "usage", "5s", "--reserve", "256MiB"],
+        30,
+    )
+    .await;
+    let output = format!("{}{}", stdout, stderr);
+
+    println!("=== Test: Reserve keeps headroom ===");
+    println!("Exit Code: {}", exit);
+    println!("{}", output);
+
+    assert_eq!(
+        exit, 0,
+        "memfill should finish cleanly rather than be OOM-killed. Output:\n{}",
+        output
+    );
+    assert_eq!(
+        count_pattern(&output, "Killed by SIGKILL"),
+        0,
+        "the reserve should prevent OOM kills. Output:\n{}",
+        output
+    );
+    assert!(
+        output.contains("available left"),
+        "expected the usage-mode allocation log. Output:\n{}",
+        output
+    );
+}
+
+#[tokio::test]
+async fn test_adaptive_requires_usage_mode() {
+    // --adaptive only makes sense in usage mode; absolute mode must be rejected up front.
+    let (stdout, stderr, exit) = run_memfill(&["100M", "absolute", "5s", "--adaptive"]).await;
+    let output = format!("{}{}", stdout, stderr);
+
+    println!("=== Test: --adaptive requires usage mode ===");
+    println!("Exit Code: {}", exit);
+    println!("{}", output);
+
+    assert_ne!(
+        exit, 0,
+        "--adaptive in absolute mode should be rejected. Output:\n{}",
+        output
+    );
+    assert!(
+        output.contains("--adaptive is only supported in usage mode"),
+        "expected the rejection message. Output:\n{}",
+        output
+    );
+}
