@@ -13,7 +13,11 @@
 mod common;
 mod memfill;
 
-use memfill::{run_memfill, run_memfill_constrained};
+use memfill::{
+    kill_container, run_memfill, run_memfill_constrained, run_memfill_targeting, start_target,
+    wait_for_process_inside_container,
+};
+use std::time::Duration;
 
 fn count_pattern(text: &str, pattern: &str) -> usize {
     text.matches(pattern).count()
@@ -381,7 +385,7 @@ async fn test_sigint_clean_shutdown() {
     let output = format!("{}{}", stdout, stderr);
 
     println!("=== Test: SIGINT Clean Shutdown ===");
-		println!("Exit Code: {}", exit);
+    println!("Exit Code: {}", exit);
     println!("{}", output);
 
     // Verify allocation happened before termination
@@ -495,6 +499,106 @@ async fn test_reserve_keeps_headroom_and_avoids_oom() {
     assert!(
         output.contains("available left"),
         "expected the usage-mode allocation log. Output:\n{}",
+        output
+    );
+}
+
+// ============================================================================
+// Cross-namespace attach: --target-pid / --target-cgroup-path
+//
+// These mirror the production invocation `nsenter -t 1 -C -- memfill
+// --target-cgroup-path <path> --target-pid <pid> ...`: memfill itself joins a
+// *separate* target container's memory cgroup and PID namespace, rather than
+// running as that container's own process (as all the tests above do).
+// ============================================================================
+
+/// (a) The computed allocation limit reflects the *target's* cgroup, not the
+/// caller's own — proving `join_cgroup` attached to the right cgroup.
+#[tokio::test]
+async fn test_target_scoped_cgroup_limit() {
+    let target = start_target(512 * 1024 * 1024, 60).await;
+
+    // The "attacker" container running memfill is otherwise unconstrained -
+    // if it read its *own* cgroup instead of the target's, the totals would be
+    // host-scale (GiB), not the target's 512 MiB limit.
+    let (stdout, stderr, exit) =
+        run_memfill_targeting(&target, &["10M", "absolute", "3s"], 20).await;
+    let output = format!("{}{}", stdout, stderr);
+
+    println!("=== Test: Target-scoped cgroup limit ===");
+    println!("Target PID: {}, cgroup: {}", target.pid, target.cgroup_path);
+    println!("Exit Code: {}", exit);
+    println!("{}", output);
+
+    assert_eq!(exit, 0, "Exit Code: {}", exit);
+    assert!(
+        output.contains("Allocating 9.5 MiB (2% of total memory)"),
+        "Expected 9.5 MiB to be ~2% of the target's 512 MiB cgroup limit. Output:\n{}",
+        output
+    );
+    // Host RAM is GiB-scale; the target's cgroup is MiB-scale. Seeing GiB here
+    // would mean the fill was scoped to the host instead of the target - the
+    // exact failure mode this whole mechanism must never have.
+    assert!(
+        !output.contains("GiB"),
+        "Totals must come from the target's cgroup (MiB scale), not the host (GiB). Output:\n{}",
+        output
+    );
+}
+
+/// (b) The chunk-holding allocation process is visible from *inside the
+/// target container's own PID namespace*, proving `enter_pid_namespace`'s
+/// `setns(CLONE_NEWPID)` took effect for memfill's per-chunk forked children.
+#[tokio::test]
+async fn test_target_pid_namespace_visibility() {
+    let target = start_target(512 * 1024 * 1024, 60).await;
+
+    let ((stdout, stderr, exit), visible) = tokio::join!(
+        run_memfill_targeting(&target, &["20M", "absolute", "15s"], 30),
+        wait_for_process_inside_container(target.id(), "memfill", Duration::from_secs(30)),
+    );
+    let output = format!("{}{}", stdout, stderr);
+
+    println!("=== Test: Target PID namespace visibility ===");
+    println!("Exit Code: {}", exit);
+    println!("{}", output);
+
+    assert!(
+        visible,
+        "Expected a memfill process in the target container's own /proc, proving the chunk \
+         child was forked into the target's PID namespace. Output:\n{}",
+        output
+    );
+}
+
+/// (c) Killing the target container reaps the chunk-holding children (the
+/// kernel SIGKILLs everything left in a PID namespace once its init dies),
+/// on top of each child's own `prctl(set_pdeathsig=SIGTERM)`.
+#[tokio::test]
+async fn test_target_container_death_reaps_children() {
+    let target = start_target(512 * 1024 * 1024, 60).await;
+
+    let ((stdout, stderr, exit), ()) = tokio::join!(
+        run_memfill_targeting(&target, &["20M", "absolute", "15s"], 30),
+        async {
+            assert!(
+                wait_for_process_inside_container(target.id(), "memfill", Duration::from_secs(30))
+                    .await,
+                "Expected the chunk child to be visible in the target before killing it"
+            );
+            kill_container(target.id()).await;
+        },
+    );
+    let output = format!("{}{}", stdout, stderr);
+
+    println!("=== Test: Target container death reaps children ===");
+    println!("Exit Code: {}", exit);
+    println!("{}", output);
+
+    assert!(
+        output.contains("Killed by SIGKILL"),
+        "Expected memfill to observe its chunk child(ren) being reaped (SIGKILL) once the \
+         target's PID namespace init died. Output:\n{}",
         output
     );
 }
