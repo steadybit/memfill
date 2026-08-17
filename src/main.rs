@@ -1,6 +1,8 @@
 use crate::allocator::{new_allocator, parse_size, size_to_bytes, AllocationMode, Size};
 use crate::mem_info::bytes_to_string_usize;
 #[cfg(target_os = "linux")]
+use crate::sys::linux::attach_to_target;
+#[cfg(target_os = "linux")]
 use crate::sys::linux::psi::memory_full_avg10;
 #[cfg(target_os = "linux")]
 use crate::sys::linux::system::adjust_oom_score;
@@ -74,6 +76,20 @@ struct Opt {
     )]
     #[cfg(target_os = "linux")]
     adaptive: bool,
+
+    #[structopt(
+        long,
+        help = "(Linux only) Cgroup to join before allocating; a plain path fragment (e.g. /kubepods/besteffort/pod123/container456), no controller prefix. Requires root."
+    )]
+    #[cfg(target_os = "linux")]
+    target_cgroup_path: Option<String>,
+
+    #[structopt(
+        long,
+        help = "(Linux only) PID whose PID namespace future allocation processes should join (setns CLONE_NEWPID; affects only children forked afterward). Requires root."
+    )]
+    #[cfg(target_os = "linux")]
+    target_pid: Option<i32>,
 }
 
 fn main() {
@@ -93,6 +109,14 @@ fn main() {
     }
 
     let opts = Opt::from_args();
+
+    // Must run before get_mem_info (cgroup introspection) and before the
+    // allocator's first fork; see attach_to_target.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = attach_to_target(opts.target_cgroup_path.as_deref(), opts.target_pid) {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
 
     #[cfg(target_os = "linux")]
     if opts.adaptive && matches!(opts.alloc_mode, AllocationMode::Absolute) {
