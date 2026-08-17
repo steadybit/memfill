@@ -1,5 +1,6 @@
+use nix::sched::{setns, CloneFlags};
 use nix::unistd::Uid;
-use std::fs;
+use std::fs::{self, File};
 
 /// Adjusts the oom_score_adj of the current process.
 ///
@@ -28,4 +29,16 @@ pub fn adjust_oom_score(score: Option<i32>) {
             eprintln!("Failed to adjust OOM score: {}", e);
         }
     }
+}
+
+/// Sets pid_for_children to `pid`'s PID namespace via `setns(CLONE_NEWPID)`.
+///
+/// Per pid_namespaces(7)/setns(2), this does NOT move the calling process
+/// itself into that namespace — it only affects children forked *after* this
+/// call. That's exactly what's needed here: it's the per-chunk allocation
+/// processes (forked later, one per chunk) that must land in the target's
+/// PID namespace, not memfill itself.
+pub fn enter_pid_namespace(pid: i32) -> std::io::Result<()> {
+    let file = File::open(format!("/proc/{}/ns/pid", pid))?;
+    Ok(setns(file, CloneFlags::CLONE_NEWPID)?)
 }

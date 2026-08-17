@@ -9,14 +9,24 @@ use bollard::service::HostConfig;
 use bollard::Docker;
 use futures::StreamExt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 use testcontainers::core::{AccessMode, Mount};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use testcontainers::{ContainerAsync, ContainerRequest, GenericImage, ImageExt};
 use tokio::sync::OnceCell;
 
 const RUST_IMAGE: &str = "rust";
 const RUST_TAG: &str = "1-trixie";
+
+/// Shared Docker client. Each `Docker` carries its own connection pool, so
+/// constructing one per call means never reusing a socket — which matters for
+/// the exec-polling loops that would otherwise open one connection per poll.
+pub fn docker() -> &'static Docker {
+    static DOCKER: OnceLock<Docker> = OnceLock::new();
+    DOCKER
+        .get_or_init(|| Docker::connect_with_local_defaults().expect("Failed to connect to Docker"))
+}
 
 /// Tracks whether the binary has been built (container is not kept)
 static BUILD_COMPLETE: OnceCell<()> = OnceCell::const_new();
@@ -60,6 +70,10 @@ pub struct ContainerConfig {
     pub cpu_period: Option<i64>,
     /// Startup timeout
     pub startup_timeout: Duration,
+    /// Attach to the Docker host/VM's namespaces: privileged, host PID namespace
+    /// and host cgroup namespace. Required to reach another container's
+    /// `/proc/<pid>` and `cgroup.procs`.
+    pub host_attach: bool,
 }
 
 impl ContainerConfig {
@@ -99,6 +113,16 @@ impl ContainerConfig {
         self
     }
 
+    /// Attach to the Docker host/VM's namespaces, so this container can reach
+    /// *another* container's `/proc/<pid>` and `cgroup.procs`: privileged (for
+    /// CAP_SYS_ADMIN), host PID namespace, and host cgroup namespace (the
+    /// latter mirrors the outer `nsenter -t 1 -C` used in production, without
+    /// which /proc/<pid>/cgroup is rendered relative to the reader's own root).
+    pub fn with_host_attach(mut self) -> Self {
+        self.host_attach = true;
+        self
+    }
+
     /// Convert this config into a host config modifier function
     pub fn into_host_config_modifier(self) -> impl Fn(&mut HostConfig) + Send + Sync + 'static {
         move |hc: &mut HostConfig| {
@@ -116,6 +140,11 @@ impl ContainerConfig {
             }
             if let Some(period) = self.cpu_period {
                 hc.cpu_period = Some(period);
+            }
+            if self.host_attach {
+                hc.privileged = Some(true);
+                hc.pid_mode = Some("host".to_string());
+                hc.cgroupns_mode = Some(bollard::service::HostConfigCgroupnsModeEnum::HOST);
             }
         }
     }
@@ -194,11 +223,8 @@ pub async fn ensure_binary_built() {
 // Command Execution
 // ============================================================================
 
-/// Run a command in a container with the given configuration
-///
-/// Creates a container that runs the command directly (not via exec),
-/// waits for it to complete, and returns stdout/stderr.
-pub async fn run_in_container(config: ContainerConfig, cmd: &[&str]) -> (String, String, i64) {
+/// Build (but do not start) the standard test image for the given command/config.
+fn build_image(config: ContainerConfig, cmd: &[&str]) -> ContainerRequest<GenericImage> {
     let cache = test_cache_dir();
     let modifier = config.into_host_config_modifier();
 
@@ -215,16 +241,34 @@ pub async fn run_in_container(config: ContainerConfig, cmd: &[&str]) -> (String,
     );
 
     // Apply resource constraints
-    image = image.with_host_config_modifier(modifier);
+    image.with_host_config_modifier(modifier)
+}
 
-    let container = image.start().await.expect("Failed to start container");
+/// Start a long-running container (e.g. `sleep <n>`) and return the handle
+/// without waiting for it to exit. Keep the returned handle alive for as long
+/// as the container should keep running — it is removed on drop.
+pub async fn start_container(
+    config: ContainerConfig,
+    cmd: &[&str],
+) -> ContainerAsync<GenericImage> {
+    build_image(config, cmd)
+        .start()
+        .await
+        .expect("Failed to start container")
+}
 
+/// Run a command in a container with the given configuration
+///
+/// Creates a container that runs the command directly (not via exec),
+/// waits for it to complete, and returns stdout/stderr.
+pub async fn run_in_container(config: ContainerConfig, cmd: &[&str]) -> (String, String, i64) {
+    let container = start_container(config, cmd).await;
     wait_and_get_output(&container).await
 }
 
 /// Wait for a container to exit and collect its output
 async fn wait_and_get_output(container: &ContainerAsync<GenericImage>) -> (String, String, i64) {
-    let docker = Docker::connect_with_local_defaults().expect("Failed to connect to Docker");
+    let docker = docker();
     let container_id = container.id();
 
     // Wait for the container to exit

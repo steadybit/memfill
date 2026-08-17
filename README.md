@@ -6,6 +6,7 @@
 
 ```
 memfill <size> <alloc-mode> <duration> [--reserve <size>] [--adaptive] [--oom-score-adj <n>] [--ignore-cgroup]
+        [--target-cgroup-path <path>] [--target-pid <pid>]
 
 ARGS:
     <size>          Size of memory to fill up; suffixes: K, M, G or %
@@ -20,6 +21,16 @@ OPTIONS:
     --oom-score-adj <n>    (Linux only) oom_score_adj for the fill process (-1000..1000). Defaults
                            to -1000 when privileged, 0 otherwise. For host fills pass a high value
                            so the OOM killer targets the fill first, not critical processes.
+
+    --target-cgroup-path <path>
+                           (Linux only) Join this cgroup before allocating, so the fill is charged
+                           against the target's memory limit instead of memfill's own. A plain path
+                           fragment (e.g. /kubepods/besteffort/pod123/container456), no controller
+                           prefix. Requires root, and a view of the host's /sys/fs/cgroup.
+    --target-pid <pid>     (Linux only) Fork the allocation processes into this PID's namespace, so
+                           they show up in the target container's own `ps`/`top`. Uses
+                           setns(CLONE_NEWPID), which by design affects only children forked
+                           afterward - memfill itself stays in its original namespace. Requires root.
 
 FLAGS:
     --adaptive        (Linux only) Free memory when the host is under memory pressure (PSI),
@@ -55,10 +66,21 @@ Same, but also back off automatically when the host starts thrashing (PSI), for 
 memfill 100% usage 2m --reserve 512MiB --adaptive
 ```
 
+Fill a *different* container's memory, scoped to its cgroup limit and visible in its own `ps`
+(this is how the Steadybit extensions run the fill-memory attack against a target container):
+
+```bash
+memfill 80% usage 1m \
+  --target-cgroup-path /kubepods/besteffort/pod123/container456 \
+  --target-pid 4242
+```
+
 ## Requirements
 
 - Linux or Windows (`x86_64`, `aarch64` on Linux)
 - No special privileges required for the default mode; reading cgroup memory limits is the only OS-level interaction
+- `--target-cgroup-path`/`--target-pid` do require root (CAP_SYS_ADMIN for `setns`, write access to the
+  target's `cgroup.procs`) and a view of the host's `/sys/fs/cgroup` and `/proc`
 
 ## Building
 

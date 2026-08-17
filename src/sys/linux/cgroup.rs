@@ -10,6 +10,9 @@ pub enum CGroupError {
     File(PathBuf, io::Error),
     Parse(PathBuf, num::ParseIntError),
     CgroupControllerNotFound(),
+    /// No cgroup.procs exists for the requested path under either the v1
+    /// memory controller or the v2 unified hierarchy.
+    CgroupProcsNotFound(String),
 }
 
 pub struct CGroupMemory {
@@ -28,6 +31,28 @@ pub fn read_cgroup_memory() -> Result<CGroupMemory, CGroupError> {
 
 fn uses_cgroup_v2() -> bool {
     Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
+}
+
+/// Joins the cgroup at `path` (a plain path fragment, e.g.
+/// "/kubepods/besteffort/pod123/container456", no controller prefix) by
+/// writing "0" to its `cgroup.procs` (kernel shorthand for "the writing
+/// process"). Must be called before any introspection (`read_cgroup_memory`)
+/// or forking, and while the caller's mount namespace still sees the host's
+/// /sys/fs/cgroup (i.e. after the outer `nsenter -t 1 -C` has already run).
+///
+/// The layout is probed rather than inferred from `uses_cgroup_v2()`: the
+/// caller resolved `path` from /proc/<pid>/cgroup and prefers the v1 line
+/// when both are present, so the root that actually holds this path is the
+/// one to trust. v1's memory controller is tried first to match that
+/// preference, with the v2 unified hierarchy as fallback.
+pub fn join_cgroup(path: &str) -> Result<(), CGroupError> {
+    let stripped = path.strip_prefix('/').unwrap_or(path);
+    let procs_path = ["/sys/fs/cgroup/memory", "/sys/fs/cgroup"]
+        .into_iter()
+        .map(|root| Path::new(root).join(stripped).join("cgroup.procs"))
+        .find(|p| p.exists())
+        .ok_or_else(|| CGroupError::CgroupProcsNotFound(path.to_string()))?;
+    fs::write(&procs_path, "0").map_err(|e| CGroupError::File(procs_path, e))
 }
 
 fn read_cgroup_v2_memory() -> Result<CGroupMemory, CGroupError> {
