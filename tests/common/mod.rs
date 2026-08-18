@@ -4,7 +4,7 @@
 //! using testcontainers.
 
 #[allow(deprecated)]
-use bollard::container::{LogsOptions, WaitContainerOptions};
+use bollard::query_parameters::{LogsOptionsBuilder, WaitContainerOptionsBuilder};
 use bollard::service::HostConfig;
 use bollard::Docker;
 use futures::StreamExt;
@@ -272,10 +272,9 @@ async fn wait_and_get_output(container: &ContainerAsync<GenericImage>) -> (Strin
     let container_id = container.id();
 
     // Wait for the container to exit
-    #[allow(deprecated)]
-    let wait_options = WaitContainerOptions {
-        condition: "not-running",
-    };
+    let wait_options = WaitContainerOptionsBuilder::new()
+        .condition("not-running")
+        .build();
 
     let mut wait_stream = docker.wait_container(container_id, Some(wait_options));
     let exit_code = match wait_stream.next().await {
@@ -288,12 +287,7 @@ async fn wait_and_get_output(container: &ContainerAsync<GenericImage>) -> (Strin
     };
 
     // Get container logs
-    #[allow(deprecated)]
-    let log_options = LogsOptions::<String> {
-        stdout: true,
-        stderr: true,
-        ..Default::default()
-    };
+    let log_options = LogsOptionsBuilder::new().stdout(true).stderr(true).build();
 
     let mut logs_stream = docker.logs(container_id, Some(log_options));
     let mut stdout = String::new();
