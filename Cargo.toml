@@ -21,7 +21,7 @@ procfs = { version = "0.16 ", default-features = false }
 sysinfo = { version = "0.35.2", features = ["system", "disk"] }
 
 [dev-dependencies]
-testcontainers = "0.26"
+testcontainers = "0.28"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
-bollard = "0.19"
+bollard = "0.21"
 futures = "0.3"
